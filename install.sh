@@ -1,200 +1,223 @@
 #!/usr/bin/env bash
 # ==============================================================================
 #  osTicket v1.18.x – Proxmox LXC Installer
-#  Inspired by community-scripts/ProxmoxVE helper style
+#  Style: community-scripts/ProxmoxVE helpers
 # ==============================================================================
 
-set -euo pipefail
+# Kein set -euo pipefail hier — wir fangen Fehler manuell ab
+# damit Whiptail-Dialoge nicht den Exit-Code 0 erfordern
 
-# ─── Color / UI ───────────────────────────────────────────────────────────────
-YW=$(echo "\033[33m"); GN=$(echo "\033[1;92m"); RD=$(echo "\033[01;31m")
-BL=$(echo "\033[36m"); CL=$(echo "\033[m"); CM="${GN}✔${CL}"; CROSS="${RD}✖${CL}"
-INFO="${BL}ℹ${CL}"; HOLD="-"
+# ─── Farben ───────────────────────────────────────────────────────────────────
+YW="\033[33m"; GN="\033[1;92m"; RD="\033[01;31m"
+BL="\033[36m"; CL="\033[m"
+CM="${GN}✔${CL}"; CROSS="${RD}✖${CL}"; INFO="${BL}ℹ${CL}"
 
-msg_info()  { echo -e "${INFO} ${1}"; }
-msg_ok()    { echo -e "${CM} ${1}"; }
-msg_error() { echo -e "${CROSS} ${RD}${1}${CL}"; exit 1; }
+msg_info()  { echo -e "  ${INFO}  ${1}"; }
+msg_ok()    { echo -e "  ${CM}  ${1}"; }
+msg_error() { echo -e "  ${CROSS}  ${RD}${1}${CL}"; exit 1; }
 
 header_info() {
-cat << "EOF"
-   ___  ______________  __        __  
-  / _ \/ __/_  __/ / / / /  ___  / /_ 
- / ___/\ \  / / / / /__/ /__/ _ \/ __/ 
-/_/  /___/ /_/ /____/____/\___/\__/  
+  clear
+  cat << "EOF"
+                 _____ _      _        _   
+                |_   _(_) ___| | _____| |_ 
+                  | | | |/ __| |/ / _ \ __|
+                  | | | | (__|   <  __/ |_ 
+                  |_| |_|\___|_|\_\___|\__|
 
+           osTicket FREE – Proxmox LXC Installer
 EOF
-echo -e "${GN}osTicket FREE – LXC Installer${CL}\n"
+  echo ""
 }
 
 # ─── Preflight ────────────────────────────────────────────────────────────────
-if [[ "$(id -u)" != "0" ]]; then
-  msg_error "Bitte als root auf dem Proxmox-Host ausführen."
-fi
-command -v pct &>/dev/null || msg_error "pct nicht gefunden – kein Proxmox-Host?"
-command -v whiptail &>/dev/null || apt-get install -y whiptail &>/dev/null
+[[ "$(id -u)" != "0" ]] && msg_error "Bitte als root auf dem Proxmox-Host ausführen."
+command -v pct    &>/dev/null || msg_error "pct nicht gefunden – kein Proxmox-Host?"
+command -v pvesm  &>/dev/null || msg_error "pvesm nicht gefunden – kein Proxmox-Host?"
 
-# ─── Defaults ─────────────────────────────────────────────────────────────────
-DEF_CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo 200)
-DEF_HOSTNAME="osticket"
-DEF_IP="172.15.15.$(shuf -i 10-250 -n1)/16"
-DEF_GW="172.15.15.1"
-DEF_DISK=8
-DEF_RAM=1024
-DEF_CORES=2
-DEF_STORAGE="BACKUP_NAS"
-DEF_BRIDGE="vmbr0"
-DEF_OSTICKET_VER="v1.18.3"
-DEF_OSTICKET_URL="https://github.com/osTicket/osTicket/releases/download/${DEF_OSTICKET_VER}/osTicket-${DEF_OSTICKET_VER}.zip"
-DEF_TEMPLATE_STORAGE="BACKUP_NAS"
-TEMPLATE="debian-12-standard_12.7-1_amd64.tar.zst"
+# whiptail sicherstellen
+if ! command -v whiptail &>/dev/null; then
+  echo "Installiere whiptail..."
+  apt-get install -y whiptail &>/dev/null
+fi
 
 header_info
 
-# ─── Whiptail Dialog ──────────────────────────────────────────────────────────
-CTID=$(whiptail --title "osTicket LXC" --inputbox \
-  "Container ID:" 8 40 "$DEF_CTID" 3>&1 1>&2 2>&3) || exit 0
+# ─── Defaults ─────────────────────────────────────────────────────────────────
+DEF_CTID=$(pvesh get /cluster/nextid 2>/dev/null || echo "200")
+DEF_HOSTNAME="osticket"
+DEF_IP="172.15.15.20/16"
+DEF_GW="172.15.15.1"
+DEF_DISK="8"
+DEF_RAM="1024"
+DEF_CORES="2"
+DEF_CT_STORAGE="BACKUP_NAS"
+DEF_TMPL_STORAGE="BACKUP_NAS"
+DEF_BRIDGE="vmbr0"
+OSTICKET_VER="v1.18.3"
+OSTICKET_URL="https://github.com/osTicket/osTicket/releases/download/${OSTICKET_VER}/osTicket-${OSTICKET_VER}.zip"
+TEMPLATE="debian-12-standard_12.7-1_amd64.tar.zst"
 
-HOSTNAME=$(whiptail --title "osTicket LXC" --inputbox \
-  "Hostname:" 8 40 "$DEF_HOSTNAME" 3>&1 1>&2 2>&3) || exit 0
+# ─── Hilfsfunktion: whiptail mit Fehlerbehandlung ─────────────────────────────
+wt_input() {
+  # wt_input <title> <prompt> <default>  -> gibt Eingabe zurück
+  local result
+  result=$(whiptail --backtitle "osTicket LXC Installer" \
+    --title "$1" --inputbox "$2" 10 52 "$3" 3>&1 1>&2 2>&3)
+  local rc=$?
+  [[ $rc -ne 0 ]] && { echo "Abgebrochen." ; exit 0; }
+  echo "$result"
+}
 
-IP=$(whiptail --title "osTicket LXC" --inputbox \
-  "IP-Adresse (CIDR):" 8 40 "$DEF_IP" 3>&1 1>&2 2>&3) || exit 0
+wt_pw() {
+  # wt_pw <title> <prompt>  -> gibt Passwort zurück
+  local result
+  result=$(whiptail --backtitle "osTicket LXC Installer" \
+    --title "$1" --passwordbox "$2" 10 52 3>&1 1>&2 2>&3)
+  local rc=$?
+  [[ $rc -ne 0 ]] && { echo "Abgebrochen."; exit 0; }
+  echo "$result"
+}
 
-GW=$(whiptail --title "osTicket LXC" --inputbox \
-  "Gateway:" 8 40 "$DEF_GW" 3>&1 1>&2 2>&3) || exit 0
-
-DISK=$(whiptail --title "osTicket LXC" --inputbox \
-  "Disk-Größe (GB):" 8 40 "$DEF_DISK" 3>&1 1>&2 2>&3) || exit 0
-
-RAM=$(whiptail --title "osTicket LXC" --inputbox \
-  "RAM (MB):" 8 40 "$DEF_RAM" 3>&1 1>&2 2>&3) || exit 0
-
-CORES=$(whiptail --title "osTicket LXC" --inputbox \
-  "CPU-Kerne:" 8 40 "$DEF_CORES" 3>&1 1>&2 2>&3) || exit 0
-
-STORAGE=$(whiptail --title "osTicket LXC" --inputbox \
-  "Proxmox Storage (für CT-Disk):" 8 40 "$DEF_STORAGE" 3>&1 1>&2 2>&3) || exit 0
-
-BRIDGE=$(whiptail --title "osTicket LXC" --inputbox \
-  "Netzwerk-Bridge:" 8 40 "$DEF_BRIDGE" 3>&1 1>&2 2>&3) || exit 0
-
-# Passwort setzen
-ROOT_PW=$(whiptail --title "osTicket LXC" --passwordbox \
-  "Root-Passwort für den Container:" 8 40 3>&1 1>&2 2>&3) || exit 0
-
-# DB-Zugangsdaten
-DB_PASS=$(whiptail --title "osTicket LXC" --passwordbox \
-  "MySQL-Passwort für osticket-User:" 8 40 3>&1 1>&2 2>&3) || exit 0
+# ─── Dialoge ──────────────────────────────────────────────────────────────────
+CTID=$(wt_input        "Container ID"        "Container ID:"                    "$DEF_CTID")
+HOSTNAME=$(wt_input    "Hostname"            "Hostname des LXC:"                "$DEF_HOSTNAME")
+IP=$(wt_input          "Netzwerk"            "IP-Adresse (CIDR):"               "$DEF_IP")
+GW=$(wt_input          "Netzwerk"            "Gateway:"                         "$DEF_GW")
+BRIDGE=$(wt_input      "Netzwerk"            "Netzwerk-Bridge:"                 "$DEF_BRIDGE")
+DISK=$(wt_input        "Ressourcen"          "Disk-Größe (GB):"                 "$DEF_DISK")
+RAM=$(wt_input         "Ressourcen"          "RAM (MB):"                        "$DEF_RAM")
+CORES=$(wt_input       "Ressourcen"          "CPU-Kerne:"                       "$DEF_CORES")
+CT_STORAGE=$(wt_input  "Storage"             "Storage für CT-Disk:"             "$DEF_CT_STORAGE")
+TMPL_STORAGE=$(wt_input "Storage"            "Storage für Templates:"           "$DEF_TMPL_STORAGE")
+ROOT_PW=$(wt_pw        "Passwörter"          "Root-Passwort für den Container:")
+DB_PASS=$(wt_pw        "Passwörter"          "MySQL-Passwort für osticket-User:")
 
 # Bestätigung
-whiptail --title "Zusammenfassung" --yesno \
+CT_IP="${IP%%/*}"
+whiptail --backtitle "osTicket LXC Installer" --title "Zusammenfassung" --yesno \
 "CT ${CTID}: ${HOSTNAME}
-IP:      ${IP}
-Gateway: ${GW}
-Disk:    ${DISK} GB  |  RAM: ${RAM} MB  |  Cores: ${CORES}
-Storage: ${STORAGE}
-Bridge:  ${BRIDGE}
+─────────────────────────────
+IP:        ${IP}
+Gateway:   ${GW}
+Bridge:    ${BRIDGE}
+─────────────────────────────
+Disk:      ${DISK} GB
+RAM:       ${RAM} MB
+Cores:     ${CORES}
+CT-Disk:   ${CT_STORAGE}
+Template:  ${TMPL_STORAGE}
+─────────────────────────────
+osTicket:  ${OSTICKET_VER}
 
-Fortfahren?" 18 55 || exit 0
+Jetzt installieren?" 22 52
+[[ $? -ne 0 ]] && { echo "Abgebrochen."; exit 0; }
 
-# ─── Template herunterladen (falls nicht vorhanden) ───────────────────────────
-msg_info "Prüfe Debian-Template ..."
-TEMPLATE_PATH=$(pvesm path "${DEF_TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" 2>/dev/null || true)
-if [[ -z "$TEMPLATE_PATH" || ! -f "$TEMPLATE_PATH" ]]; then
-  msg_info "Template wird heruntergeladen ..."
-  pveam update &>/dev/null
-  pveam download "${DEF_TEMPLATE_STORAGE}" "$TEMPLATE" &>/dev/null \
-    || msg_error "Template-Download fehlgeschlagen. Storage-Name korrekt?"
+echo ""
+msg_info "Starte Installation ..."
+
+# ─── Template prüfen / herunterladen ─────────────────────────────────────────
+msg_info "Prüfe Debian-12-Template ..."
+TMPL_FILE=$(pvesm path "${TMPL_STORAGE}:vztmpl/${TEMPLATE}" 2>/dev/null || true)
+if [[ -z "$TMPL_FILE" || ! -f "$TMPL_FILE" ]]; then
+  msg_info "Lade Template herunter (${TEMPLATE}) ..."
+  pveam update &>/dev/null || true
+  pveam download "$TMPL_STORAGE" "$TEMPLATE" \
+    || msg_error "Template-Download fehlgeschlagen. Storage '${TMPL_STORAGE}' korrekt?"
+  msg_ok "Template heruntergeladen"
+else
+  msg_ok "Template bereits vorhanden"
 fi
-msg_ok "Template bereit"
 
 # ─── LXC erstellen ────────────────────────────────────────────────────────────
 msg_info "Erstelle LXC CT${CTID} ..."
-pct create "$CTID" "${DEF_TEMPLATE_STORAGE}:vztmpl/${TEMPLATE}" \
-  --hostname "$HOSTNAME" \
-  --cores "$CORES" \
-  --memory "$RAM" \
-  --swap 512 \
-  --rootfs "${STORAGE}:${DISK}" \
-  --net0 "name=eth0,bridge=${BRIDGE},ip=${IP},gw=${GW}" \
-  --ostype debian \
-  --password "$ROOT_PW" \
+pct create "$CTID" "${TMPL_STORAGE}:vztmpl/${TEMPLATE}" \
+  --hostname  "$HOSTNAME" \
+  --cores     "$CORES" \
+  --memory    "$RAM" \
+  --swap      512 \
+  --rootfs    "${CT_STORAGE}:${DISK}" \
+  --net0      "name=eth0,bridge=${BRIDGE},ip=${IP},gw=${GW}" \
+  --ostype    debian \
+  --password  "$ROOT_PW" \
   --unprivileged 1 \
-  --features nesting=1 \
-  --start 0
+  --features  nesting=1 \
+  --onboot    1 \
+  --start     0 \
+  || msg_error "pct create fehlgeschlagen."
 msg_ok "CT${CTID} erstellt"
 
-# ─── CT starten ───────────────────────────────────────────────────────────────
+# ─── LXC starten ─────────────────────────────────────────────────────────────
 msg_info "Starte CT${CTID} ..."
-pct start "$CTID"
-sleep 5
-msg_ok "CT gestartet"
+pct start "$CTID" || msg_error "pct start fehlgeschlagen."
+sleep 8
+msg_ok "CT${CTID} gestartet"
 
-# ─── Installations-Payload via pct exec ───────────────────────────────────────
-msg_info "Installiere Abhängigkeiten (LAMP + PHP 8.2) ..."
-pct exec "$CTID" -- bash -c "
-set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
+# ─── Funktion: Befehl im CT ausführen ─────────────────────────────────────────
+ct() { pct exec "$CTID" -- bash -c "$1"; }
 
-# Grundpakete & Repos
-apt-get update -qq
-apt-get install -y -qq curl wget unzip gnupg2 lsb-release ca-certificates apt-transport-https software-properties-common
+# ─── System-Update & Basis-Pakete ─────────────────────────────────────────────
+msg_info "System-Update & Basis-Pakete ..."
+ct "export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq curl wget unzip gnupg2 lsb-release \
+      ca-certificates apt-transport-https software-properties-common 2>&1 | tail -1"
+msg_ok "Basis-Pakete installiert"
 
-# PHP 8.2 via sury.org
-curl -fsSL https://packages.sury.org/php/apt.gpg | gpg --dearmor -o /usr/share/keyrings/php-archive-keyring.gpg
-echo 'deb [signed-by=/usr/share/keyrings/php-archive-keyring.gpg] https://packages.sury.org/php/ bookworm main' \
-  > /etc/apt/sources.list.d/php.list
-apt-get update -qq
+# ─── PHP 8.2 Repo ─────────────────────────────────────────────────────────────
+msg_info "Füge PHP 8.2 (sury.org) hinzu ..."
+ct "curl -fsSL https://packages.sury.org/php/apt.gpg \
+      | gpg --dearmor -o /usr/share/keyrings/php-archive-keyring.gpg
+    echo 'deb [signed-by=/usr/share/keyrings/php-archive-keyring.gpg] https://packages.sury.org/php/ bookworm main' \
+      > /etc/apt/sources.list.d/php.list
+    apt-get update -qq"
+msg_ok "PHP-Repo hinzugefügt"
 
-# LAMP
-apt-get install -y -qq \
-  apache2 \
-  mariadb-server mariadb-client \
-  php8.2 php8.2-cli php8.2-fpm \
-  php8.2-mysql php8.2-gd php8.2-imap php8.2-intl \
-  php8.2-mbstring php8.2-xml php8.2-zip php8.2-curl \
-  php8.2-apcu php8.2-bcmath \
-  libapache2-mod-php8.2
+# ─── LAMP installieren ────────────────────────────────────────────────────────
+msg_info "Installiere Apache, MariaDB, PHP 8.2 (dauert ~1 Min) ..."
+ct "export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y -qq \
+      apache2 \
+      mariadb-server mariadb-client \
+      php8.2 php8.2-cli \
+      php8.2-mysql php8.2-gd php8.2-imap php8.2-intl \
+      php8.2-mbstring php8.2-xml php8.2-zip php8.2-curl \
+      php8.2-apcu php8.2-bcmath \
+      libapache2-mod-php8.2 2>&1 | tail -1"
+msg_ok "LAMP installiert"
 
-# PHP config
-sed -i 's/^upload_max_filesize.*/upload_max_filesize = 20M/' /etc/php/8.2/apache2/php.ini
-sed -i 's/^post_max_size.*/post_max_size = 25M/'            /etc/php/8.2/apache2/php.ini
-sed -i 's/^;date.timezone.*/date.timezone = Europe\/Berlin/' /etc/php/8.2/apache2/php.ini
-" 2>&1 | grep -v "^debconf\|^Selecting\|^(Reading\|^Unpacking\|^Setting up\|^Processing" || true
-msg_ok "LAMP + PHP 8.2 installiert"
+# ─── PHP konfigurieren ────────────────────────────────────────────────────────
+msg_info "PHP konfigurieren ..."
+ct "sed -i 's/^upload_max_filesize.*/upload_max_filesize = 20M/' /etc/php/8.2/apache2/php.ini
+    sed -i 's/^post_max_size.*/post_max_size = 25M/'            /etc/php/8.2/apache2/php.ini
+    sed -i 's|^;date.timezone.*|date.timezone = Europe/Berlin|' /etc/php/8.2/apache2/php.ini"
+msg_ok "PHP konfiguriert"
 
-# ─── Datenbank anlegen ────────────────────────────────────────────────────────
+# ─── MariaDB ──────────────────────────────────────────────────────────────────
 msg_info "Konfiguriere MariaDB ..."
-pct exec "$CTID" -- bash -c "
-set -euo pipefail
-systemctl enable --now mariadb &>/dev/null
-mysql -u root <<SQL
+ct "systemctl enable --now mariadb &>/dev/null
+    mysql -u root <<SQL
 CREATE DATABASE IF NOT EXISTS osticket CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS 'osticket'@'localhost' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON osticket.* TO 'osticket'@'localhost';
 FLUSH PRIVILEGES;
-SQL
-"
+SQL"
 msg_ok "Datenbank 'osticket' angelegt"
 
-# ─── osTicket herunterladen & entpacken ───────────────────────────────────────
-msg_info "Lade osTicket ${DEF_OSTICKET_VER} herunter ..."
-pct exec "$CTID" -- bash -c "
-set -euo pipefail
-cd /tmp
-wget -q '${DEF_OSTICKET_URL}' -O osticket.zip
-unzip -q osticket.zip -d /var/www/osticket
-cp /var/www/osticket/upload/include/ost-sampleconfig.php \
-   /var/www/osticket/upload/include/ost-config.php
-chmod 0666 /var/www/osticket/upload/include/ost-config.php
-chown -R www-data:www-data /var/www/osticket
-"
-msg_ok "osTicket entpackt"
+# ─── osTicket herunterladen ────────────────────────────────────────────────────
+msg_info "Lade osTicket ${OSTICKET_VER} herunter ..."
+ct "cd /tmp
+    wget -q '${OSTICKET_URL}' -O osticket.zip || { echo 'Download fehlgeschlagen'; exit 1; }
+    unzip -q osticket.zip -d /var/www/osticket
+    cp /var/www/osticket/upload/include/ost-sampleconfig.php \
+       /var/www/osticket/upload/include/ost-config.php
+    chmod 0666 /var/www/osticket/upload/include/ost-config.php
+    chown -R www-data:www-data /var/www/osticket"
+msg_ok "osTicket entpackt nach /var/www/osticket/upload"
 
 # ─── Apache VHost ─────────────────────────────────────────────────────────────
-msg_info "Konfiguriere Apache VHost ..."
-pct exec "$CTID" -- bash -c "
-cat > /etc/apache2/sites-available/osticket.conf << 'VHOST'
+msg_info "Konfiguriere Apache ..."
+ct "cat > /etc/apache2/sites-available/osticket.conf << 'VHOST'
 <VirtualHost *:80>
     ServerAdmin webmaster@localhost
     DocumentRoot /var/www/osticket/upload
@@ -207,33 +230,32 @@ cat > /etc/apache2/sites-available/osticket.conf << 'VHOST'
     CustomLog \${APACHE_LOG_DIR}/osticket_access.log combined
 </VirtualHost>
 VHOST
-
-a2dissite 000-default.conf &>/dev/null
-a2ensite osticket.conf &>/dev/null
-a2enmod rewrite &>/dev/null
-systemctl restart apache2
-"
+    a2dissite 000-default.conf &>/dev/null
+    a2ensite osticket.conf &>/dev/null
+    a2enmod rewrite &>/dev/null
+    systemctl restart apache2"
 msg_ok "Apache konfiguriert"
 
-# ─── Cron für osTicket ────────────────────────────────────────────────────────
-pct exec "$CTID" -- bash -c "
-echo '*/5 * * * * www-data /usr/bin/php /var/www/osticket/upload/api/cron.php' \
-  > /etc/cron.d/osticket
-"
+# ─── Cron ─────────────────────────────────────────────────────────────────────
+ct "echo '*/5 * * * * www-data /usr/bin/php /var/www/osticket/upload/api/cron.php' \
+      > /etc/cron.d/osticket"
 
-# ─── Firewall-Info ────────────────────────────────────────────────────────────
-CT_IP=$(echo "$IP" | cut -d'/' -f1)
+# ─── Services aktivieren ──────────────────────────────────────────────────────
+ct "systemctl enable apache2 mariadb &>/dev/null"
 
+# ─── Fertig ───────────────────────────────────────────────────────────────────
 echo ""
-msg_ok "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-msg_ok " osTicket ${DEF_OSTICKET_VER} Installation abgeschlossen!"
-msg_ok "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "  ${YW}Web-Installer:${CL}  http://${CT_IP}/setup/"
-echo -e "  ${YW}DB-Name:${CL}        osticket"
-echo -e "  ${YW}DB-User:${CL}        osticket"
-echo -e "  ${YW}DB-Host:${CL}        localhost"
-echo -e ""
-echo -e "  ${RD}Nach dem Web-Setup unbedingt ausführen:${CL}"
-echo -e "  pct exec ${CTID} -- rm -rf /var/www/osticket/upload/setup"
-echo -e "  pct exec ${CTID} -- chmod 0644 /var/www/osticket/upload/include/ost-config.php"
-echo -e ""
+echo -e "  ╔══════════════════════════════════════════════════════╗"
+echo -e "  ║       ${GN}osTicket ${OSTICKET_VER} – Installation fertig!${CL}       ║"
+echo -e "  ╠══════════════════════════════════════════════════════╣"
+echo -e "  ║  ${YW}Web-Installer:${CL}  http://${CT_IP}/setup/              "
+echo -e "  ║                                                      "
+echo -e "  ║  ${YW}DB-Name:${CL}   osticket                                  "
+echo -e "  ║  ${YW}DB-User:${CL}   osticket                                  "
+echo -e "  ║  ${YW}DB-Host:${CL}   localhost                                 "
+echo -e "  ╠══════════════════════════════════════════════════════╣"
+echo -e "  ║  ${RD}Nach dem Web-Setup UNBEDINGT ausführen:${CL}               "
+echo -e "  ║  pct exec ${CTID} -- rm -rf /var/www/osticket/upload/setup"
+echo -e "  ║  pct exec ${CTID} -- chmod 0644 /var/www/osticket/upload/include/ost-config.php"
+echo -e "  ╚══════════════════════════════════════════════════════╝"
+echo ""
