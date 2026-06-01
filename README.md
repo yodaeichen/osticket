@@ -3,7 +3,7 @@
 ## One-Liner (auf dem Proxmox-Host als root ausführen)
 
 ```bash
-bash -c "$(wget -qO- https://raw.githubusercontent.com/yodaeichen/main/osticket/install.sh)"
+bash -c "$(wget -qO- https://raw.githubusercontent.com/yodaeichen/osticket/main/install.sh)"
 ```
 
 > Ersetze `yodaeichen` durch dein GitHub-Repo, sobald du das Script dort abgelegt hast.
